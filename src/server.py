@@ -1,76 +1,94 @@
-import tkinter as tk
 from socket import socket, AF_INET, SOCK_STREAM
 from threading import Thread
+import tkinter as tk
 
-client_sockets = []
+clients = {}
 
-
-def send_massage(text_area, text_input):
-    massage = text_input.get()
-    if massage:
-        for client_socket in client_sockets:
+def broadcast_message(sender_socket, message):
+    for client_socket, username in clients.items():
+        if client_socket != sender_socket:
             try:
-                client_socket.send(massage.encode())
+                client_socket.send(message.encode())
             except Exception as e:
-                print(f"Error sending message to a client: {e}")
-                client_sockets.remove(client_socket)
-        text_area.config(state=tk.NORMAL)
-        text_area.insert(tk.END, 'You: ' + massage + '\n')
-        text_area.config(state=tk.DISABLED)
-        text_input.delete(0, tk.END)
-
-
-def receive_massage(client_socket, text_area):
-    while True:
-        try:
-            massage = client_socket.recv(1500).decode()
-            if massage.lower() == 'exit':
+                print(f"Error sending message to {username}: {e}")
                 client_socket.close()
-                client_sockets.remove(client_socket)
+                del clients[client_socket]
+
+def send_user_list():
+    user_list = list(clients.values())
+    for client_socket in clients:
+        client_socket.send(f"[Server] Online Users: {', '.join(user_list)}".encode())
+
+def route_message(sender_socket, message):
+    try:
+        if ':' in message:
+            target_user, actual_message = message.split(':', 1)
+            target_user = target_user.strip()
+            actual_message = actual_message.strip()
+
+            for client_socket, username in clients.items():
+                if username == target_user:
+                    client_socket.send(f"[Private from {clients[sender_socket]}]: {actual_message}".encode())
+                    return
+
+            sender_socket.send(f"[Server] User '{target_user}' not found.".encode())
+        else:
+            broadcast_message(sender_socket, f"{clients[sender_socket]}: {message}")
+    except Exception as e:
+        print(f"Error routing message: {e}")
+
+def handle_client(client_socket):
+    try:
+        username = client_socket.recv(1500).decode().strip()
+        if not username or username in clients.values():
+            client_socket.send("[Server] Invalid or duplicate username.".encode())
+            client_socket.close()
+            return
+
+        clients[client_socket] = username
+        log_message(f"[Server] User '{username}' connected.")
+        broadcast_message(client_socket, f"[Server] User '{username}' has joined the chat.")
+        send_user_list()
+
+        while True:
+            message = client_socket.recv(1500).decode()
+            if message.lower() == 'exit':
                 break
-            text_area.config(state=tk.NORMAL)
-            text_area.insert(tk.END, 'Client: ' + massage + '\n')
-            text_area.config(state=tk.DISABLED)
-            text_area.yview(tk.END)
-        except Exception as e:
-            print(f"Error receiving message from a client: {e}")
-            client_sockets.remove(client_socket)
-            break
+            route_message(client_socket, message)
 
+        send_user_list()  # Send updated user list when someone disconnects
+    except Exception as e:
+        print(f"Error handling client: {e}")
 
-def start_server(text_area, host='127.0.0.1', port=8080):
+    log_message(f"[Server] User '{clients[client_socket]}' disconnected.")
+    del clients[client_socket]
+    client_socket.close()
+
+def start_server():
     server_socket = socket(AF_INET, SOCK_STREAM)
-    server_socket.bind((host, port))
+    server_socket.bind(('127.0.0.1', 8080))
     server_socket.listen()
-    print(f'Server started on {host}:{port} and waiting for connections...')
+    log_message("[Server] Server started on 127.0.0.1:8080...")
 
     while True:
         client_socket, client_address = server_socket.accept()
-        client_sockets.append(client_socket)
-        print(f'Connection from {client_address}')
+        log_message(f"[Server] Connection from {client_address}")
+        Thread(target=handle_client, args=(client_socket,)).start()
 
-        thread = Thread(target=receive_massage, args=(client_socket, text_area))
-        thread.daemon = True
-        thread.start()
+def log_message(message):
+    log_area.config(state=tk.NORMAL)
+    log_area.insert(tk.END, f'{message}\n')
+    log_area.config(state=tk.DISABLED)
+    log_area.yview(tk.END)
 
-
-# Graphical Interface
 window = tk.Tk()
-window.title("Fala Aí")
-window.geometry("400x400")
+window.title("Server")
+window.geometry("300x200")
 
-text_area = tk.Text(window, height=5, width=50, state="disabled")
-text_area.pack(pady=10)
+log_area = tk.Text(window, state='disabled')
+log_area.pack(expand=True, fill='both')
 
-text_input = tk.Entry(window, width=50)
-text_input.pack(pady=10)
-
-send_button = tk.Button(window, text="Send", width=20,
-                        command=lambda: send_massage(text_area, text_input))
-send_button.pack(pady=10)
-
-# Start server in a new thread
-server_thread = Thread(target=start_server, args=(text_area,))
+server_thread = Thread(target=start_server)
 server_thread.daemon = True
 server_thread.start()
 
