@@ -3,7 +3,8 @@ from threading import Thread
 import tkinter as tk
 from tkinter import simpledialog, messagebox, ttk
 
-def send_message(client_socket, text_area, text_input, target_user=None):
+
+def send_message(client_socket, target_user, text_input, text_area):
     message = text_input.get()
     if not message:
         return
@@ -20,27 +21,67 @@ def send_message(client_socket, text_area, text_input, target_user=None):
     except Exception as e:
         print(f"Error sending message: {e}")
 
-def receive_message(client_socket, text_area, user_list):
+
+def receive_message(client_socket, frames, notebook):
     while True:
         try:
             message = client_socket.recv(1500).decode()
-            text_area.config(state=tk.NORMAL)
-            text_area.insert(tk.END, f'{message}\n')
-            text_area.config(state=tk.DISABLED)
-            text_area.yview(tk.END)
 
-            # Update user list when a new list is received from the server
-            if "Online Users" in message:
-                users = message.split(":")[1].strip()
-                update_user_list(user_list, users.split(","))
+            if message.startswith("[UserList]"):
+                user_list = message.replace("[UserList]", "").split(",")
+                update_user_frames(frames, notebook, user_list)
+            elif message.startswith("[Broadcast]"):
+                broadcast_message = message.replace("[Broadcast]", "").strip()
+                update_broadcast_frame(frames, broadcast_message)
+            elif message.startswith("[Private from "):
+                sender = message.split(']')[0].replace("[Private from ", "").strip()
+                private_message = message.split(']:', 1)[1].strip()
+                update_private_frame(frames, notebook, sender, f"{sender}: {private_message}")
+            elif message.startswith("[Private to "):
+                target_user = message.split(']')[0].replace("[Private to ", "").strip()
+                private_message = message.split(']:', 1)[1].strip()
+                update_private_frame(frames, notebook, target_user, f"You: {private_message}")
+            else:
+                print(f"Unhandled message: {message}")
         except Exception as e:
             print(f"Error receiving message: {e}")
             break
 
-def update_user_list(user_list, users):
-    user_list.delete(0, tk.END)
-    for user in users:
-        user_list.insert(tk.END, user)
+
+def update_broadcast_frame(frames, message):
+    text_area = frames["Broadcast"]["text_area"]
+    text_area.config(state=tk.NORMAL)
+    text_area.insert(tk.END, f'{message}\n')
+    text_area.config(state=tk.DISABLED)
+    text_area.yview(tk.END)
+
+
+def update_private_frame(frames, notebook, user, message):
+    if user not in frames:
+        create_private_frame(frames, notebook, user)
+    text_area = frames[user]["text_area"]
+    text_area.config(state=tk.NORMAL)
+    text_area.insert(tk.END, f'{message}\n')
+    text_area.config(state=tk.DISABLED)
+    text_area.yview(tk.END)
+
+
+def create_private_frame(frames, notebook, user):
+    private_frame = tk.Frame(notebook)
+    notebook.add(private_frame, text=user)
+
+    text_area = tk.Text(private_frame, state='disabled')
+    text_area.pack(expand=True, fill='both')
+
+    text_input = tk.Entry(private_frame)
+    text_input.pack(fill='x', pady=5)
+
+    send_button = tk.Button(private_frame, text="Send",
+                            command=lambda: send_message(client_socket, user, text_input, text_area))
+    send_button.pack(pady=5)
+
+    frames[user] = {"frame": private_frame, "text_area": text_area, "text_input": text_input}
+
 
 def get_username():
     username = ""
@@ -50,6 +91,21 @@ def get_username():
             messagebox.showerror("Error", "Username cannot be empty.")
     return username
 
+
+def update_user_frames(frames, notebook, user_list):
+    for user in user_list:
+        if user not in frames and user != username:  # Evita criar frame para si mesmo
+            create_private_frame(frames, notebook, user)
+
+    # Remover frames de usuários que saíram
+    existing_users = list(frames.keys())
+    for user in existing_users:
+        if user not in user_list and user != "Broadcast":
+            notebook.forget(frames[user]["frame"])
+            del frames[user]
+
+
+# GUI
 window = tk.Tk()
 window.title("Chat Client")
 window.geometry("500x500")
@@ -57,29 +113,23 @@ window.geometry("500x500")
 notebook = ttk.Notebook(window)
 notebook.pack(expand=True, fill='both')
 
+frames = {}
+
 broadcast_frame = tk.Frame(notebook)
 notebook.add(broadcast_frame, text="Broadcast")
 
-private_frame = tk.Frame(notebook)
-notebook.add(private_frame, text="Private")
-
 text_area_broadcast = tk.Text(broadcast_frame, state='disabled')
-text_area_broadcast.grid(row=0, column=0, sticky='nsew')
+text_area_broadcast.pack(expand=True, fill='both')
 
 text_input_broadcast = tk.Entry(broadcast_frame)
-text_input_broadcast.grid(row=1, column=0, sticky='ew', pady=5)
+text_input_broadcast.pack(fill='x', pady=5)
 
-text_area_private = tk.Text(private_frame, state='disabled')
-text_area_private.grid(row=0, column=0, rowspan=4, sticky='nsew')
+send_button_broadcast = tk.Button(broadcast_frame, text="Send",
+                                  command=lambda: send_message(client_socket, None, text_input_broadcast,
+                                                               text_area_broadcast))
+send_button_broadcast.pack(pady=5)
 
-text_input_private = tk.Entry(private_frame)
-text_input_private.grid(row=4, column=0, sticky='ew', pady=5)
-
-user_list = tk.Listbox(private_frame)
-user_list.grid(row=0, column=1, rowspan=4, sticky='ns', padx=5)
-
-send_button_private = tk.Button(private_frame, text="Send", command=lambda: send_message(client_socket, text_area_private, text_input_private, target_user=user_list.get(tk.ACTIVE)))
-send_button_private.grid(row=5, column=1, sticky='ew', pady=5)
+frames["Broadcast"] = {"frame": broadcast_frame, "text_area": text_area_broadcast, "text_input": text_input_broadcast}
 
 username = get_username()
 
@@ -87,18 +137,6 @@ client_socket = socket(AF_INET, SOCK_STREAM)
 client_socket.connect(('127.0.0.1', 8080))
 client_socket.send(username.encode())
 
-send_button_broadcast = tk.Button(broadcast_frame, text="Send", command=lambda: send_message(client_socket, text_area_broadcast, text_input_broadcast))
-send_button_broadcast.grid(row=2, column=0, pady=5)
-
-Thread(target=receive_message, args=(client_socket, text_area_broadcast, user_list), daemon=True).start()
-
-# Configure grid layout for both frames to expand correctly
-broadcast_frame.grid_rowconfigure(0, weight=1)
-broadcast_frame.grid_columnconfigure(0, weight=1)
-
-private_frame.grid_rowconfigure(0, weight=3)
-private_frame.grid_rowconfigure(4, weight=1)
-private_frame.grid_columnconfigure(0, weight=3)
-private_frame.grid_columnconfigure(1, weight=1)
+Thread(target=receive_message, args=(client_socket, frames, notebook), daemon=True).start()
 
 window.mainloop()
